@@ -1,0 +1,35 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: cyb3r-prod
+  region: us-east-1
+  tags:
+    project: cyb3r-kub3n3t3s
+    environment: production
+
+# Pin two zones that support EKS (us-east-1e does not)
+availabilityZones: ["us-east-1a", "us-east-1b"]
+
+vpc:
+  nat:
+    gateway: Single
+
+accessConfig:
+  authenticationMode: API_AND_CONFIG_MAP
+  accessEntries:
+    - principalARN: arn:aws:iam::<ACCOUNT_ID>:role/cyb3r-jenkins-platform-role
+      accessPolicies:
+        - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy
+          accessScope:
+            type: namespace
+            namespaces: ["production"]
+
+managedNodeGroups:
+  - name: prod-workers
+    instanceType: c7i-flex.large
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 3
+    volumeSize: 20
+    privateNetworking: true
