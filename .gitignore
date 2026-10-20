@@ -13,3 +13,4 @@ jenkins-kubeconfig
 *.tfstate.*
 tfplan
 crash.log
+.pytest_cache/
