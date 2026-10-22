@@ -2,11 +2,11 @@ apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 
 metadata:
-  name: cyb3r-prod
+  name: cyb3r-eks
   region: us-east-1
   tags:
     project: cyb3r-kub3n3t3s
-    environment: production
+    version: v2-github-actions
 
 # Pin two zones that support EKS (us-east-1e does not)
 availabilityZones: ["us-east-1a", "us-east-1b"]
@@ -18,7 +18,15 @@ vpc:
 accessConfig:
   authenticationMode: API_AND_CONFIG_MAP
   accessEntries:
-    - principalARN: arn:aws:iam::<ACCOUNT_ID>:role/cyb3r-jenkins-platform-role
+    # GitHub Actions staging job: edit rights in the staging namespace only
+    - principalARN: arn:aws:iam::<ACCOUNT_ID>:role/cyb3r-gha-staging
+      accessPolicies:
+        - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy
+          accessScope:
+            type: namespace
+            namespaces: ["staging"]
+    # GitHub Actions production job: edit rights in the production namespace only
+    - principalARN: arn:aws:iam::<ACCOUNT_ID>:role/cyb3r-gha-production
       accessPolicies:
         - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy
           accessScope:
@@ -26,8 +34,8 @@ accessConfig:
             namespaces: ["production"]
 
 managedNodeGroups:
-  - name: prod-workers
-    instanceType: c7i-flex.large
+  - name: workers
+    instanceType: c7i-flex.large     # free-tier eligible (t3.medium is blocked on your plan)
     desiredCapacity: 2
     minSize: 2
     maxSize: 3
