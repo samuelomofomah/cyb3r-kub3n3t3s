@@ -33,3 +33,15 @@ variable "create_github_oidc_provider" {
   type        = bool
   default     = true
 }
+
+variable "github_owner_id" {
+  description = "Numeric GitHub account ID (used in immutable OIDC subjects)"
+  type        = string
+  default     = "254310021"
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repository ID (used in immutable OIDC subjects)"
+  type        = string
+  default     = "1424661786"
+}
