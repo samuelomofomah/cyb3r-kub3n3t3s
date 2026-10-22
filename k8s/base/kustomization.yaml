@@ -5,4 +5,5 @@ resources:
   - api.yaml
   - web.yaml
   - ingress.yaml
+  - pdb.yaml
   
