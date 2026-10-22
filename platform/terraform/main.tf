@@ -2,7 +2,6 @@ data "aws_caller_identity" "current" {}
 
 locals {
   account_id  = data.aws_caller_identity.current.account_id
-  repo        = "${var.github_owner}/${var.github_repo}"
   oidc_host   = "token.actions.githubusercontent.com"
   cluster_arn = "arn:aws:eks:${var.region}:${local.account_id}:cluster/${var.eks_cluster_name}"
 
@@ -12,11 +11,15 @@ locals {
     : "arn:aws:iam::${local.account_id}:oidc-provider/${local.oidc_host}"
   )
 
+  # GitHub issues "immutable" subjects: name@numeric-id for both owner and repo.
+  # The numeric IDs are permanent, so a re-created repo with the same name can't match.
+  sub_prefix = "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}"
+
   # Which GitHub job identity may assume which role
   gha_roles = {
-    build      = "repo:${local.repo}:ref:refs/heads/main"
-    staging    = "repo:${local.repo}:environment:staging"
-    production = "repo:${local.repo}:environment:production"
+    build      = "${local.sub_prefix}:ref:refs/heads/main"
+    staging    = "${local.sub_prefix}:environment:staging"
+    production = "${local.sub_prefix}:environment:production"
   }
 }
 
