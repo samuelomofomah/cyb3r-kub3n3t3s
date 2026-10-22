@@ -1,0 +1,200 @@
+name: release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: cyb3r-eks
+  REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
+
+jobs:
+  # ---------------- CI: runs on every PR and on main ----------------
+  test:
+    name: Unit tests (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, web]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r apps/${{ matrix.app }}/requirements.txt -r apps/${{ matrix.app }}/requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: apps/${{ matrix.app }}
+        run: python -m pytest -q
+
+  snyk-code:
+    name: Snyk deps + IaC
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Snyk CLI
+        run: |
+          sudo curl -fsSL https://static.snyk.io/cli/latest/snyk-linux -o /usr/local/bin/snyk
+          sudo chmod +x /usr/local/bin/snyk
+          snyk --version
+
+      - name: Snyk dependency scan (fail on high)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          for app in api web; do
+            pip install -q -r apps/$app/requirements.txt
+            echo "=== Snyk dependency scan: $app ==="
+            snyk test --file=apps/$app/requirements.txt --package-manager=pip \
+              --command=python --severity-threshold=high
+          done
+
+      - name: Snyk Kubernetes IaC scan (fail on high)
+        run: snyk iac test k8s/ --severity-threshold=high
+
+  # ---------------- CD: main only ----------------
+  build:
+    name: Build, scan, push (${{ matrix.app }})
+    needs: snyk-code
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      matrix:
+        app: [api, web]
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set image tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: AWS login (OIDC, build role)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/cyb3r-gha-build
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: ECR login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        run: docker build --pull -t "$REGISTRY/cyb3r-${{ matrix.app }}:$TAG" apps/${{ matrix.app }}
+
+      - name: Install Snyk CLI
+        run: |
+          sudo curl -fsSL https://static.snyk.io/cli/latest/snyk-linux -o /usr/local/bin/snyk
+          sudo chmod +x /usr/local/bin/snyk
+
+      - name: Snyk container scan (fail on critical)
+        run: |
+          snyk container test "$REGISTRY/cyb3r-${{ matrix.app }}:$TAG" \
+            --file=apps/${{ matrix.app }}/Dockerfile --severity-threshold=critical
+
+      - name: Push to ECR
+        run: docker push "$REGISTRY/cyb3r-${{ matrix.app }}:$TAG"
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: http://staging.${{ vars.BASE_DOMAIN }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set image tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: AWS login (OIDC, staging role)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/cyb3r-gha-staging
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connect kubectl to EKS
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Deploy
+        run: bash scripts/deploy.sh staging
+
+      - name: Smoke test
+        run: bash scripts/smoke-test.sh staging
+
+  deploy-production:
+    name: Deploy to production
+    needs: deploy-staging
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: http://app.${{ vars.BASE_DOMAIN }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set image tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: AWS login (OIDC, production role)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/cyb3r-gha-production
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connect kubectl to EKS
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Deploy
+        run: bash scripts/deploy.sh production
+
+      - name: Smoke test
+        run: bash scripts/smoke-test.sh production
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          echo "Rolling production back to the previous version..."
+          for d in web api; do
+            kubectl -n production rollout undo "deployment/$d" || true
+          done
+
+      - name: Release summary
+        if: success()
+        run: |
+          echo "### ✅ Release \`$TAG\` is LIVE in production" >> "$GITHUB_STEP_SUMMARY"
+          echo "URL: http://app.$BASE_DOMAIN" >> "$GITHUB_STEP_SUMMARY"

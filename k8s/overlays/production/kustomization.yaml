@@ -13,12 +13,11 @@ configMapGenerator:
     literals:
       - APP_ENV=production
 patches:
-  # On EKS the AWS load balancer is the only way in, so the Ingress
-  # answers on any address instead of one host name.
+  # Staging and production share one NLB, so each Ingress needs its own host.
   - target:
       kind: Ingress
       name: web
     patch: |-
-      - op: remove
+      - op: replace
         path: /spec/rules/0/host
-        
+        value: app.__DOMAIN__
