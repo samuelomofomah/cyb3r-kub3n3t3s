@@ -4,26 +4,32 @@ variable "region" {
   default     = "us-east-1"
 }
 
-variable "name" {
-  description = "Name of the platform server"
+variable "github_owner" {
+  description = "GitHub user or org that owns the repo"
   type        = string
-  default     = "cyb3r-kub3n3t3s-platform"
+  default     = "samuelomofomah"
 }
 
-variable "instance_type" {
-  description = "Free-tier eligible, 2 vCPU / 8 GiB, x86"
+variable "github_repo" {
+  description = "Repository allowed to assume the pipeline roles"
   type        = string
-  default     = "m7i-flex.large"
-}
-
-variable "root_volume_gb" {
-  description = "Disk size for Docker images and Jenkins builds"
-  type        = number
-  default     = 30
+  default     = "cyb3r-kub3n3t3s"
 }
 
 variable "eks_cluster_name" {
-  description = "Production EKS cluster Jenkins is allowed to look up"
+  description = "EKS cluster hosting the staging and production namespaces"
   type        = string
-  default     = "cyb3r-prod"
+  default     = "cyb3r-eks"
+}
+
+variable "apps" {
+  description = "Services that get an ECR repository"
+  type        = list(string)
+  default     = ["api", "web"]
+}
+
+variable "create_github_oidc_provider" {
+  description = "Set to false if the account already has the GitHub OIDC provider"
+  type        = bool
+  default     = true
 }

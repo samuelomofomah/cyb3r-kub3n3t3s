@@ -1,147 +1,140 @@
-# ---------- Lookups ----------
 data "aws_caller_identity" "current" {}
 
-data "http" "my_ip" {
-  url = "https://checkip.amazonaws.com"
-}
-
 locals {
-  my_ip_cidr    = "${chomp(data.http.my_ip.response_body)}/32"
-  ingress_ports = { ssh = 22, staging_web = 80, jenkins = 8080 }
+  account_id  = data.aws_caller_identity.current.account_id
+  repo        = "${var.github_owner}/${var.github_repo}"
+  oidc_host   = "token.actions.githubusercontent.com"
+  cluster_arn = "arn:aws:eks:${var.region}:${local.account_id}:cluster/${var.eks_cluster_name}"
+
+  oidc_provider_arn = (
+    var.create_github_oidc_provider
+    ? aws_iam_openid_connect_provider.github[0].arn
+    : "arn:aws:iam::${local.account_id}:oidc-provider/${local.oidc_host}"
+  )
+
+  # Which GitHub job identity may assume which role
+  gha_roles = {
+    build      = "repo:${local.repo}:ref:refs/heads/main"
+    staging    = "repo:${local.repo}:environment:staging"
+    production = "repo:${local.repo}:environment:production"
+  }
 }
 
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical, the publisher of Ubuntu
+# ---------- GitHub OIDC provider ----------
+resource "aws_iam_openid_connect_provider" "github" {
+  count          = var.create_github_oidc_provider ? 1 : 0
+  url            = "https://${local.oidc_host}"
+  client_id_list = ["sts.amazonaws.com"]
+}
 
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+# ---------- ECR repositories ----------
+resource "aws_ecr_repository" "app" {
+  for_each             = toset(var.apps)
+  name                 = "cyb3r-${each.key}"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
   }
 
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
+  encryption_configuration {
+    encryption_type = "AES256"
   }
 }
 
-data "aws_vpc" "default" {
-  default = true
+resource "aws_ecr_lifecycle_policy" "app" {
+  for_each   = aws_ecr_repository.app
+  repository = each.value.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep the last 20 images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 20
+      }
+      action = { type = "expire" }
+    }]
+  })
 }
 
-data "aws_subnet" "platform" {
-  vpc_id            = data.aws_vpc.default.id
-  availability_zone = "${var.region}a"
-  default_for_az    = true
-}
+# ---------- IAM roles for GitHub Actions ----------
+data "aws_iam_policy_document" "gha_trust" {
+  for_each = local.gha_roles
 
-# ---------- SSH key ----------
-resource "tls_private_key" "ssh" {
-  algorithm = "ED25519"
-}
-
-resource "aws_key_pair" "platform" {
-  key_name   = "${var.name}-key"
-  public_key = tls_private_key.ssh.public_key_openssh
-}
-
-resource "local_sensitive_file" "pem" {
-  content         = tls_private_key.ssh.private_key_openssh
-  filename        = "${path.module}/${var.name}.pem"
-  file_permission = "0400"
-}
-
-# ---------- Firewall ----------
-resource "aws_security_group" "platform" {
-  name        = "${var.name}-sg"
-  description = "cyb3r-kub3n3t3s platform server"
-  vpc_id      = data.aws_vpc.default.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "from_my_ip" {
-  for_each          = local.ingress_ports
-  security_group_id = aws_security_group.platform.id
-  cidr_ipv4         = local.my_ip_cidr
-  from_port         = each.value
-  to_port           = each.value
-  ip_protocol       = "tcp"
-  description       = each.key
-}
-
-resource "aws_vpc_security_group_egress_rule" "all_out" {
-  security_group_id = aws_security_group.platform.id
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "-1"
-  description       = "Allow all outbound (apt, Docker Hub, GitHub, Snyk, AWS APIs)"
-}
-
-# ---------- IAM role for Jenkins (replaces manual Step 3B.1) ----------
-data "aws_iam_policy_document" "ec2_trust" {
   statement {
-    actions = ["sts:AssumeRole"]
+    actions = ["sts:AssumeRoleWithWebIdentity"]
 
     principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
+      type        = "Federated"
+      identifiers = [local.oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:sub"
+      values   = [each.value]
     }
   }
 }
 
-resource "aws_iam_role" "jenkins_platform" {
-  name               = "cyb3r-jenkins-platform-role"
-  assume_role_policy = data.aws_iam_policy_document.ec2_trust.json
+resource "aws_iam_role" "gha" {
+  for_each             = local.gha_roles
+  name                 = "cyb3r-gha-${each.key}"
+  assume_role_policy   = data.aws_iam_policy_document.gha_trust[each.key].json
+  max_session_duration = 3600
 }
 
-data "aws_iam_policy_document" "describe_prod_cluster" {
+# Build role: push images to the two ECR repos only
+data "aws_iam_policy_document" "build" {
   statement {
-    sid       = "ReadProdClusterInfo"
+    sid       = "EcrLogin"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "PushAppImages"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+    ]
+    resources = [for r in aws_ecr_repository.app : r.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "build" {
+  name   = "cyb3r-ecr-push"
+  role   = aws_iam_role.gha["build"].id
+  policy = data.aws_iam_policy_document.build.json
+}
+
+# Deploy roles: find the cluster; Kubernetes rights come from EKS access entries
+data "aws_iam_policy_document" "deploy" {
+  statement {
+    sid       = "FindCluster"
     actions   = ["eks:DescribeCluster"]
-    resources = ["arn:aws:eks:${var.region}:${data.aws_caller_identity.current.account_id}:cluster/${var.eks_cluster_name}"]
+    resources = [local.cluster_arn]
   }
 }
 
-resource "aws_iam_role_policy" "describe_prod_cluster" {
-  name   = "cyb3r-describe-prod-cluster"
-  role   = aws_iam_role.jenkins_platform.id
-  policy = data.aws_iam_policy_document.describe_prod_cluster.json
-}
-
-resource "aws_iam_instance_profile" "jenkins_platform" {
-  name = "cyb3r-jenkins-platform-profile"
-  role = aws_iam_role.jenkins_platform.name
-}
-
-# ---------- The server ----------
-resource "aws_instance" "platform" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
-  subnet_id              = data.aws_subnet.platform.id
-  key_name               = aws_key_pair.platform.key_name
-  vpc_security_group_ids = [aws_security_group.platform.id]
-  iam_instance_profile   = aws_iam_instance_profile.jenkins_platform.name
-
-  root_block_device {
-    volume_size = var.root_volume_gb
-    volume_type = "gp3"
-    encrypted   = true
-  }
-
-  metadata_options {
-    http_tokens                 = "required" # IMDSv2 only
-    http_put_response_hop_limit = 2
-  }
-
-  tags = {
-    Name = var.name
-  }
-}
-
-# ---------- A public IP that never changes ----------
-resource "aws_eip" "platform" {
-  instance = aws_instance.platform.id
-  domain   = "vpc"
-
-  tags = {
-    Name = "${var.name}-eip"
-  }
+resource "aws_iam_role_policy" "deploy" {
+  for_each = toset(["staging", "production"])
+  name     = "cyb3r-eks-describe"
+  role     = aws_iam_role.gha[each.key].id
+  policy   = data.aws_iam_policy_document.deploy.json
 }

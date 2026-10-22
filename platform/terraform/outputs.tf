@@ -1,28 +1,12 @@
-output "public_ip" {
-  value = aws_eip.platform.public_ip
-}
-
-output "ssh_command" {
-  value = "ssh -i ${local_sensitive_file.pem.filename} ubuntu@${aws_eip.platform.public_ip}"
-}
-
-output "jenkins_url" {
-  value = "http://${aws_eip.platform.public_ip}:8080"
-}
-
-output "base_domain" {
-  description = "Paste into BASE_DOMAIN in the Jenkinsfile"
-  value       = "${aws_eip.platform.public_ip}.nip.io"
-}
-
-output "staging_url" {
-  value = "http://staging.${aws_eip.platform.public_ip}.nip.io"
-}
-
 output "account_id" {
-  value = data.aws_caller_identity.current.account_id
+  value = local.account_id
 }
 
-output "jenkins_role_arn" {
-  value = aws_iam_role.jenkins_platform.arn
+output "ecr_registry" {
+  description = "Use as the image registry in the workflow"
+  value       = "${local.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+}
+
+output "role_arns" {
+  value = { for k, r in aws_iam_role.gha : k => r.arn }
 }
