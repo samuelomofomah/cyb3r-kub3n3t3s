@@ -8,11 +8,12 @@ ENV_NAME="$1"
 
 echo "Deploying ${TAG} to ${ENV_NAME}"
 
-kubectl kustomize "k8s/overlays/${ENV_NAME}" \
-  | sed -e "s|__REGISTRY__|${REGISTRY}|g" \
-        -e "s|__TAG__|${TAG}|g" \
-        -e "s|__DOMAIN__|${BASE_DOMAIN}|g" \
-  | kubectl apply -f -
+   kubectl kustomize "k8s/overlays/${ENV_NAME}" \
+     | sed -e "s|value: __TAG__|value: '${TAG}'|g" \
+           -e "s|__REGISTRY__|${REGISTRY}|g" \
+           -e "s|__TAG__|${TAG}|g" \
+           -e "s|__DOMAIN__|${BASE_DOMAIN}|g" \
+     | kubectl apply -f -
 
 for d in redis api web; do
   kubectl -n "${ENV_NAME}" rollout status "deployment/${d}" --timeout=240s
