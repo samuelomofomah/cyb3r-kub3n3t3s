@@ -188,7 +188,8 @@ def deployTo(String ns) {
   withCluster(ns) {
     sh """
       kubectl kustomize k8s/overlays/${ns} \\
-        | sed -e "s|__REGISTRY__|${env.REGISTRY}|g" \\
+        | sed -e "s|value: __TAG__|value: '${env.TAG}'|g" \\
+              -e "s|__REGISTRY__|${env.REGISTRY}|g" \\
               -e "s|__TAG__|${env.TAG}|g" \\
               -e "s|__DOMAIN__|${env.BASE_DOMAIN}|g" \\
         | kubectl apply -f -
