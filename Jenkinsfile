@@ -16,8 +16,8 @@ pipeline {
 
   environment {
     REGISTRY    = 'cyb3rr'
-    BASE_DOMAIN = '100.56.198.3.nip.io'
-    PROD_HOST   = 'ac5666824c32048a7b1b25392d86cd31-873150263.us-east-1.elb.amazonaws.com'
+    BASE_DOMAIN = '3.234.91.82.nip.io'
+    PROD_HOST   = 'a7c4478e80fc24f2789a433713f522a2-1276282183.us-east-1.elb.amazonaws.com'
     AWS_REGION  = 'us-east-1'
     EKS_CLUSTER = 'cyb3r-prod'
     APPS        = 'api web'
